@@ -1057,7 +1057,7 @@ class AskingTheServiceACardIsMissingTests(SearchTestCase):
         self.assertTrue(stored)
         after = await read(page_load=False)
         self.assertEqual(len(after), 1, "the two services' premieres drew two cards")
-        self.assertEqual(after[0].ids.get("simkl"), "4242",
+        self.assertEqual(after[0].ids.get("simkl"), 4242,
                          "the read after the write was served the month from before it")
 
 

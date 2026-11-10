@@ -12,6 +12,7 @@ is exactly the state a fill leaves behind.
 """
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from datetime import date, datetime, timezone
 
@@ -116,11 +117,20 @@ class FillingFromTheStoredCalendarTests(DistraktTestCase):
         """MEASURED, NOT ASSUMED: every window on the author's live instance
         carries only the shared key, so an index built off the group's merged
         `ids` would find nothing in any of them until each expired and refilled.
-        Each source's own record says whose slug it is, and always did."""
+        Each source's own record says whose slug it is, and always did.
+
+        THE ROWS ARE WRITTEN AS THEY WERE, not through a fill: a fill files a
+        group's ids in the store's one spelling (metadata/ids.py's `stored`),
+        which keeps no bare `slug` — so only a group filed before that holds
+        one, and the reader still has to read it."""
         await distrakt.add_month_record(self.user_id, self.month, a_record(
             season=1, kind=distrakt.RecordKind.COMPLETED,
             ids={"tmdb": 900, "simkl": 222, "trakt": 111}))
         await store_calendar(legacy())
+        for source, ids in (("simkl", {"tmdb": 900, "simkl": 222, "slug": "a-show"}),
+                            ("trakt", {"tmdb": 900, "trakt": 111, "slug": "a-show-2019"})):
+            await db.execute(f"UPDATE titles SET {source}_ids_json = ? "
+                             f"WHERE {source}_id IS NOT NULL", (json.dumps(ids),))
 
         self.assertEqual(await naming.fill_from_calendar(self.user_id, SETTINGS), 2)
         ids = await self._month_ids(distrakt.RecordKind.COMPLETED)

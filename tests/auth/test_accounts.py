@@ -563,7 +563,8 @@ class ClientIpTests(unittest.TestCase):
 class CookieTests(unittest.TestCase):
     def _set(self, settings, request=None):
         response = Response()
-        auth.set_session_cookie(response, "SESSIONVALUE", settings, request)
+        auth.set_session_cookie(response, "SESSIONVALUE", settings, request,
+                                leads_with_passkey=False)
         return response.headers["set-cookie"]
 
     def test_default_is_secure_and_host_prefixed(self):

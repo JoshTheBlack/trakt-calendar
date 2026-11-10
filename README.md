@@ -134,6 +134,27 @@ docker run -p 8000:8000 -v trakt-data:/data \
   ghcr.io/<owner>/trakt-new-shows:latest
 ```
 
+### Passkeys — needs an https public base URL
+
+A passkey is one more way to sign in to an account that already exists, beside its password
+and its Trakt, Simkl or Plex sign-in — not a second factor, and not a way to create an
+account. Add one from the Account page's Sign-in tab: it asks for the account's current password first, so
+an account made through Trakt, Simkl or Plex sets a password before it can add one. Each
+passkey can be renamed or removed there, and the last way into an account can't be removed.
+
+Once a browser has signed in to an account that holds a passkey, its sign-in page leads with
+**Sign in with a passkey**; the username and password are one press away under "Use your
+password instead", and the Trakt, Simkl and Plex buttons are unchanged. Where the browser
+offers it, the username box also lists your passkeys.
+
+Passkeys are made for the public base URL, so they are offered only when it is `https://…`
+(or `http://localhost…` for a local install) — the Account page says so otherwise — and only
+work at that address, not by a LAN IP. An administrator can see each account's passkeys on
+the admin screen and remove one, with the same "this is their only way in" confirmation as
+unlinking a service.
+
+Tested in Chrome/Edge (Chromium) and Firefox on Windows. Safari and iOS are untested.
+
 ### `trusted_proxy_ips` — required for correct rate limiting
 
 Comma-separated CIDRs whose `X-Forwarded-For` this app believes. The default `127.0.0.1/32`
@@ -523,7 +544,8 @@ app/
   ── auth: a layer every feature may depend on, not a peer feature ──
   auth/             passwords, sessions, cookies, identities, handshakes, invites,
                      lockout, prefs, users, levels, admin
-    routes.py         Onboarding, register, sign in/out, account page
+    routes.py         Onboarding, register, sign in/out (passkeys too), account page
+    passkeys.py       Passkeys: the relying party, options, verification and storage
     admin_routes.py   Admin screen: accounts, invites, retired identifiers
     provider_login.py The sign-in/register/link completion every provider shares
     provider_avatars.py  Seeding an account's picture from the service it signed in with

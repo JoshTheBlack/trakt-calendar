@@ -131,6 +131,68 @@ class ARefillWritesOnlyWhatChangedTests(DatabaseTestCase):
         self.assertNotIn("Simkl 3", written)
 
 
+class EveryWriterSpellsAGroupsIdsOneWayTests(DatabaseTestCase):
+    """A listing, a description and the Simkl enrichment all write a group's
+    ids. When the listing filed them as its service stated them — the bare
+    `slug`, Simkl's `traktslug` and `tvdbslug` — and a description filed them
+    through `ids.canonical`, each description took those off and the next fill
+    put them back: a refill that changed nothing wrote the group."""
+
+    TRAKT_IDS = {"trakt": 101, "slug": "nine", "trakt_slug": "nine", "tmdb": 701}
+    SIMKL_IDS = {"simkl": 5001, "slug": "five", "simkl_slug": "five", "tvdb": 9001,
+                 "traktslug": "five-2020", "tvdbslug": "five-tvdb", "anidb": 33}
+
+    def listed(self) -> list[Record]:
+        return [
+            Record(source=Source.TRAKT, media=Media.SHOW, id="101", ids=dict(self.TRAKT_IDS),
+                   detail_url="", title="Nine", air_ts=DAY, season=1, episode_number=1),
+            Record(source=Source.SIMKL, media=Media.SHOW, id="5001", ids=dict(self.SIMKL_IDS),
+                   detail_url="", title="Five", air_ts=DAY + 1, season=1, episode_number=1,
+                   enriched=False)]
+
+    async def describe(self) -> None:
+        """Each service's own description of its title, saying what its listing
+        said."""
+        from app.metadata import descriptions
+        from zoneinfo import ZoneInfo
+
+        from tests.metadata.test_panel import _answer
+        for source, own, title, ids in (("trakt", "101", "Nine", self.TRAKT_IDS),
+                                        ("simkl", "5001", "Five", self.SIMKL_IDS)):
+            answer = _answer(source, own, None, title=title, poster="", ids=dict(ids))
+            await db.transaction(lambda conn, s=source, o=own, a=answer: descriptions.write(
+                conn, s, "show", o, a, asked_season=None, tz=ZoneInfo("UTC"), now=db.now()))
+
+    async def stored_ids(self, source: str) -> dict:
+        import json
+        return json.loads(await db.fetch_value(
+            f"SELECT {source}_ids_json FROM titles WHERE {source}_id IS NOT NULL"))
+
+    async def test_a_listing_files_no_spelling_a_description_would_take_off(self):
+        await store(self.listed())
+        self.assertEqual(await self.stored_ids("trakt"),
+                         {"trakt": 101, "trakt_slug": "nine", "tmdb": 701})
+        self.assertEqual(await self.stored_ids("simkl"),
+                         {"simkl": 5001, "simkl_slug": "five", "tvdb": 9001})
+
+    async def test_listing_then_description_then_the_same_listing_writes_nothing(self):
+        await store(self.listed())
+        await self.describe()
+        with statements_run() as run, statements_executed() as executed:
+            await store(self.listed())
+        self.assertEqual(run, [])
+        self.assertEqual([sql.split()[2] for sql in executed], ["calendar_coverage"])
+
+    async def test_the_enrichment_puts_back_no_spelling_a_description_took_off(self):
+        from app.calendar import enrich as calendar_enrich
+        await store(self.listed())
+        await self.describe()
+        await calendar_enrich._upsert_success(5001, "show", {
+            "genres": [], "ids": {**self.SIMKL_IDS, "mal": "77"}}, now=db.now())
+        self.assertEqual(await self.stored_ids("simkl"),
+                         {"simkl": 5001, "simkl_slug": "five", "tvdb": 9001, "mal": 77})
+
+
 class AChangingWindowDecidesBeforeItsTurnTests(DatabaseTestCase):
     """A window whose answer changes its rows decides them on a plain read, and
     its turn uses that decision when what it was decided from reads the same

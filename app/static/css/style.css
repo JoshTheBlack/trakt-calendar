@@ -2144,7 +2144,62 @@ body.auth-page.has-nav .auth-shell { max-width: 680px; }
 .auth-provider-btn.ready { color: var(--text); cursor: pointer; text-decoration: none; }
 .auth-provider-btn.ready:hover { background: rgba(255,255,255,0.07); border-color: var(--gold-soft); }
 
+/* THE ACCOUNT PAGE'S TABS: radios and these rules, as the tracker's are. The
+   radios sit outside the card (auth_me.html says why), so a panel and a label are
+   chosen by `:has()` on the element holding both. */
+.account-tab-radio { position: absolute; width: 1px; height: 1px; opacity: 0; }
+.account-tab-strip {
+    display: flex; flex-wrap: wrap; gap: 2px; border-bottom: 1px solid var(--card-border);
+}
+.account-tab {
+    border-bottom: 2px solid transparent; color: var(--text-dim); padding: 9px 16px;
+    cursor: pointer; font-size: 0.9rem; font-weight: 600;
+}
+.account-tab:hover { color: var(--text); }
+.account-panel { display: none; flex-direction: column; gap: 18px; }
+#accountTabs:has(#account-tab-sign-in:checked) [data-account-panel="sign-in"],
+#accountTabs:has(#account-tab-profile:checked) [data-account-panel="profile"],
+#accountTabs:has(#account-tab-preferences:checked) [data-account-panel="preferences"] {
+    display: flex;
+}
+#accountTabs:has(#account-tab-sign-in:checked) .account-tab[for="account-tab-sign-in"],
+#accountTabs:has(#account-tab-profile:checked) .account-tab[for="account-tab-profile"],
+#accountTabs:has(#account-tab-preferences:checked) .account-tab[for="account-tab-preferences"] {
+    color: var(--gold-soft); border-bottom-color: var(--gold);
+}
+#accountTabs:has(#account-tab-sign-in:focus-visible) .account-tab[for="account-tab-sign-in"],
+#accountTabs:has(#account-tab-profile:focus-visible) .account-tab[for="account-tab-profile"],
+#accountTabs:has(#account-tab-preferences:focus-visible) .account-tab[for="account-tab-preferences"] {
+    outline: 2px solid var(--gold); outline-offset: -2px;
+}
+@media (max-width: 420px) { .account-tab { padding: 8px 10px; font-size: 0.84rem; } }
+/* A sentence pointing at another tab: a label for that tab's radio, drawn as a link. */
+.auth-tab-link { color: var(--accent-blue); cursor: pointer; }
+.auth-tab-link:hover { text-decoration: underline; }
+
+/* THE PASSKEY BUTTON, from the sign-in page's load POST (_passkey_signin.html):
+   a column like the service buttons, its divider inside it so a page with no
+   button draws no stray "or". Leading the page, it is the gold one. */
+.passkey-sign-in { display: flex; flex-direction: column; gap: 10px; }
+.passkey-sign-in.is-lead .auth-provider-btn.ready { border-color: var(--gold-soft); color: var(--gold-soft); }
+.passkey-sign-in .auth-error:empty { display: none; }
+/* "Use your password instead": the password form one press away on a page that
+   leads with a passkey (_password_fold.html). A <details>, so no script. */
+.auth-fold > summary {
+    cursor: pointer; color: var(--text-dim); font-size: 0.85rem; padding: 6px 0;
+    list-style-position: inside;
+}
+.auth-fold > summary:hover { color: var(--text); }
+.auth-fold[open] > summary { margin-bottom: 12px; }
+.auth-fold .auth-notice { margin-bottom: 12px; }
+
 .auth-list { display: flex; flex-direction: column; gap: 8px; }
+/* A passkey's row wraps: its name and badge, then when it was added and used,
+   then Rename and Remove — too many to share one line at phone width. */
+.auth-list .row.passkey-row { flex-wrap: wrap; justify-content: flex-start; }
+.auth-list .row.passkey-row .auth-sub { margin: 0; flex: 1 1 100%; }
+/* An account with no password: the button off, and the line saying why under it. */
+.passkey-add .auth-sub { margin: 0; flex: 1 1 100%; }
 .auth-list .row {
     display: flex; align-items: center; justify-content: space-between; gap: 10px;
     padding: 9px 12px; background: var(--card); border: 1px solid var(--card-border);

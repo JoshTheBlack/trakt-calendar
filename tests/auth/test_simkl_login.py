@@ -450,7 +450,7 @@ class ScopeRefusalTests(SimklOAuthTestCase):
         self.sign_in_as(user)
         resp = self.callback(self.start("/auth/simkl/link"), token=_Token(scope="media:read"))
         self.assertEqual(resp.status_code, 400)
-        self.assertIn('href="/me"', resp.text)
+        self.assertIn('href="/me?tab=sign-in"', resp.text)
 
 
 class LegacyTokenTests(SimklOAuthTestCase):

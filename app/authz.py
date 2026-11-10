@@ -454,10 +454,12 @@ def _install_first_run_gate(app: FastAPI) -> None:
 
 # Reachable while the encryption key is wrong, when everything else is gated to the
 # recovery screen: the recovery page and its actions, sign-in (so an admin whose
-# session lapsed can get back in) with the cookie check its page asks for, the
-# health probe, and static assets. The recovery page resolves the viewer itself, so
-# it is reachable signed-out to send them to /login.
-KEY_MISMATCH_PATHS = ("/healthz", "/login", "/login/cookie-check", "/logout")
+# session lapsed can get back in) with the cookie check its page asks for and its
+# passkey button and finish (a passkey keeps nothing sealed, app/auth/passkeys.py),
+# the health probe, and static assets. The recovery page resolves the viewer itself,
+# so it is reachable signed-out to send them to /login.
+KEY_MISMATCH_PATHS = ("/healthz", "/login", "/login/cookie-check", "/login/passkey/offer",
+                      "/login/passkey", "/logout")
 KEY_MISMATCH_PREFIXES = ("/static/", "/admin/encryption/")
 
 

@@ -118,6 +118,7 @@ NOT_HOLDERS: dict[str, str] = {
     "user_prefs": "a viewer's settings",
     "sessions": "sign-ins",
     "linked_identities": "linked accounts",
+    "passkeys": "passkeys an account signs in with",
     "login_attempts": "rate limits",
     "auth_handshakes": "sign-in handshakes",
     "invites": "invitations",

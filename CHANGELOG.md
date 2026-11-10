@@ -25,6 +25,7 @@ All notable changes to this project are documented here. Format loosely follows 
 - 📜 **A very busy day shows a hundred cards first**, the ones most of your services list, and a **Show the other N** button.
 - 🔄 **A month that changes while it's open says so**, with a link to reload it.
 - 🖼️ **Rankings boards show posters for titles TMDB doesn't list**, mostly anime, where they showed an empty frame.
+- 🔑 **Sign in with a passkey.** Add one from your Account page (it asks for your password first); once a browser has used one, the sign-in page leads with it and your password is one press away. Needs an https public base URL.
 
 ### Changed
 - 🔀 **A card shows your first service's answer for each detail**, its day and time included. Where services disagree, a mark on its poster shows every service's answer, on every card of that show.

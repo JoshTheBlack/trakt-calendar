@@ -244,7 +244,7 @@ class SharedRedirectSignInTests(_RedirectProvider):
         self.sign_in_as(user)
         resp = self.callback(self.start(self.path("link")))
         self.assertEqual(resp.status_code, 303)
-        self.assertEqual(resp.headers["location"], "/me")
+        self.assertEqual(resp.headers["location"], "/me?tab=sign-in")
         rows = self.identities()
         self.assertEqual(len(rows), 1)
         self.assertEqual(int(rows[0]["user_id"]), user)

@@ -46,13 +46,13 @@ from fastapi.responses import FileResponse, RedirectResponse, Response
 # `auth` is the package this module lives in, reached through the parent so the
 # routes read the public surface app/auth/__init__.py exposes rather than
 # knowing which submodule each name is defined in.
-from .. import auth, authz, chrome, db, providers, route_params, secrets_box
+from .. import auth, authz, chrome, clock, db, providers, route_params, secrets_box
 from ..config import Settings, load_settings, save_settings
 from ..media import user_images
 from ..templating import templates
 # Bound as `trakt_auth` because inside app/auth/ a bare `trakt` would read as the
 # Trakt SOURCE (app/providers/trakt/); this is the login flow.
-from . import provider_avatars, revocation
+from . import passkeys, provider_avatars, revocation
 from . import trakt as trakt_auth
 from .levels import AuthLevel
 
@@ -94,6 +94,22 @@ def go_to(target: str) -> Response:
     """Send the browser to `target` as a real navigation — see the module
     docstring for why this is a header and not a redirect status."""
     return Response(status_code=204, headers={"HX-Redirect": target})
+
+
+async def _signed_in(request: Request, user_id: int, calendar_approved: bool,
+                     settings: Settings, ip: str) -> Response:
+    """THE END OF EVERY SIGN-IN THIS MODULE MAKES — first-run setup, registration,
+    a password and a passkey: the account's last sign-in stamped, a session, and
+    the browser sent to the calendar, or to its own account page while it waits
+    on approval. Said once, so the four cannot come to differ in what a session
+    is issued with — the sign-in hint included (cookies.set_session_cookie)."""
+    await auth.mark_logged_in(user_id)
+    session_id = await auth.create_session(
+        user_id, user_agent=request.headers.get("user-agent"), ip_address=ip)
+    response = go_to("/" if calendar_approved else "/me")
+    auth.set_session_cookie(response, session_id, settings, request,
+                            leads_with_passkey=await passkeys.holds_any(user_id))
+    return response
 
 
 def _source_prefs():
@@ -202,15 +218,7 @@ async def onboarding_create(request: Request):
     # BEFORE the session below, so the very first cookie this instance issues
     # already carries the right policy.
     settings = await _adopt_cookie_policy(settings, request)
-    await auth.mark_logged_in(user_id)
-    session_id = await auth.create_session(
-        user_id,
-        user_agent=request.headers.get("user-agent"),
-        ip_address=auth.client_ip(request, settings),
-    )
-    response = go_to("/")
-    auth.set_session_cookie(response, session_id, settings, request)
-    return response
+    return await _signed_in(request, user_id, True, settings, auth.client_ip(request, settings))
 
 
 # Said the same way whether the count check or the unique index caught it.
@@ -435,13 +443,7 @@ async def register(request: Request):
         return await _fail("That username is taken.")
 
     await auth.record_registration_attempt(ip, token, True)
-    await auth.mark_logged_in(user_id)
-    session_id = await auth.create_session(
-        user_id, user_agent=request.headers.get("user-agent"), ip_address=ip,
-    )
-    response = go_to("/" if calendar_approved else "/me")
-    auth.set_session_cookie(response, session_id, settings, request)
-    return response
+    return await _signed_in(request, user_id, calendar_approved, settings, ip)
 
 
 # ---------------------------------------------------------------------------
@@ -479,6 +481,7 @@ async def login_page(request: Request):
     if not await auth.any_users_exist():
         return RedirectResponse("/onboarding", status_code=303)
     settings, key_mismatch = await _settings_even_if_sealed()
+    relying_party = passkeys.relying_party(settings)
     response = templates.TemplateResponse(request, "auth_login.html", {
         "request": request,
         # Sign in with Trakt cannot work while a secret is sealed under the wrong
@@ -492,6 +495,15 @@ async def login_page(request: Request):
         # with a client secret that will not open under the wrong key, so the
         # button is off exactly when Trakt's is and for the same reason.
         "simkl_login_configured": settings.simkl_login_configured,
+        # PASSKEYS ARE OFFERED where the public base URL is one a browser makes
+        # them for (passkeys.relying_party), and the page LEADS with one where this
+        # browser last signed in to an account holding one (the sign-in hint,
+        # app/auth/cookies.py) — ignored where none is offered, so a changed setting
+        # never leaves a page leading with a control that is not there.
+        "passkeys_offered": relying_party is not None,
+        "passkey_origin": relying_party.origin if relying_party else "",
+        "lead_with_passkey": (relying_party is not None
+                              and auth.leads_with_passkey(request, settings)),
         **_og_context(settings, "/login"),
     })
     # The page asks, once it has loaded, whether this cookie came back — see
@@ -606,13 +618,8 @@ async def login(request: Request):
     # anyone locks out the whole instance.
     await auth.clear_attempts("username", username_key)
     await auth.clear_attempts("ip", ip)
-    await auth.mark_logged_in(int(user["id"]))
-    session_id = await auth.create_session(
-        int(user["id"]), user_agent=request.headers.get("user-agent"), ip_address=ip,
-    )
-    response = go_to("/" if user["calendar_approved"] else "/me")
-    auth.set_session_cookie(response, session_id, settings, request)
-    return response
+    return await _signed_in(request, int(user["id"]), bool(user["calendar_approved"]),
+                            settings, ip)
 
 
 @guard.post("/logout", AuthLevel.PUBLIC)
@@ -649,8 +656,11 @@ async def me_page(request: Request):
     calendar_approved lands here from /login and stays here whenever they try
     to reach a gated route."""
     user = await auth.require_session(request)
+    keys = [tab["key"] for tab in ACCOUNT_TABS]
+    asked = request.query_params.get("tab")
     return templates.TemplateResponse(
-        request, "auth_me.html", await _account_context(request, user.session_id))
+        request, "auth_me.html", await _account_context(
+            request, user.session_id, account_tab=asked if asked in keys else keys[0]))
 
 
 # ---------------------------------------------------------------------------
@@ -672,12 +682,21 @@ async def me_page(request: Request):
 # A REFUSAL IS A SENTENCE IN THE SECTION, at 200. A non-200 is never swapped, so a
 # statused refusal would be a press that did nothing.
 
+# THE ACCOUNT PAGE'S TABS, in the order the strip draws them; the first is the one
+# a bare /me opens on. `?tab=` names another — the way back from linking a service
+# names Sign-in — and a name not here opens the first.
+ACCOUNT_TABS = (
+    {"key": "sign-in", "label": "Sign-in"},
+    {"key": "profile", "label": "Profile"},
+    {"key": "preferences", "label": "Preferences"},
+)
 ACCOUNT_SECTIONS = {
     "avatar": "_account_avatar.html",
     "names": "_account_names.html",
     "identities": "_account_identities.html",
     "metadata_order": "_account_order.html",
     "sharing": "_account_sharing.html",
+    "passkeys": "_account_passkeys.html",
     "credentials": "_account_credentials.html",
 }
 
@@ -715,11 +734,16 @@ async def _account_context(request: Request, session_id: str, **notes) -> dict:
     orders = await _account_orders(user.user_id, settings)
     prefs = await auth.get_user_prefs(user.user_id)
     pictures = await user_images.account_pictures(user.user_id)
+    ways = await auth.account_ways_in(user.user_id)
+    relying_party = passkeys.relying_party(settings)
+    held = await passkeys.for_account(user.user_id)
+    zone = clock.first_zone(user.timezone, settings.timezone)
     return {
         "request": request,
         # is_admin, calendar_available, ranker_available, version, build
         # for the shared header.
         **chrome.page_context(user),
+        "account_tabs": ACCOUNT_TABS,
         # This page gates the tracker's menu item server-side rather than leaving
         # it to CSS — it must not mention the tracker at all to an account without
         # the grant. Same two conditions the tracker's own access level enforces.
@@ -762,11 +786,25 @@ async def _account_context(request: Request, session_id: str, **notes) -> dict:
         # than showing none. A link nobody signs in with (TMDB's) is never a way
         # in, so it can always go, and never counts as the one left
         # (app/auth/revocation.py, identities.unlink_identity).
-        "can_unlink": _unlinkable(identities, bool(account and account["password_hash"])),
+        "can_unlink": _unlinkable(identities, ways),
         # Drives whether the password form asks for a current password, and
         # whether the "a password is your way back in" nudge is shown.
         "has_password": bool(account and account["password_hash"]),
         "min_password_length": auth.MIN_PASSWORD_LENGTH,
+        # PASSKEYS: offered only where the public base URL is one a browser makes
+        # passkeys for (passkeys.relying_party), and drawn for that origin alone —
+        # the page cannot know the address it was reached by, so static/js/
+        # passkey.js reveals the controls where it is that origin. Remove is drawn
+        # for a passkey whose removal leaves a way in, by the answer the removal
+        # itself refuses by (identities.WaysIn).
+        "passkey_origin": relying_party.origin if relying_party else "",
+        "passkeys": held,
+        "passkey_removable": frozenset(key.id for key in held
+                                       if not ways.leaves_none(passkey=key.id)),
+        "passkey_suggested": passkeys.suggested_name(request.headers.get("user-agent")),
+        "passkey_most": passkeys.MAX_PER_ACCOUNT,
+        "passkey_name_max": passkeys.NAME_MAX,
+        "passkey_day": lambda timestamp: _day(timestamp, zone),
         "display_name_max": auth.DISPLAY_NAME_MAX,
         "has_avatar": pictures.has_avatar,
         # THE PICTURE'S OWN VERSION, SO A RELOAD CANNOT SHOW THE OLD ONE. These
@@ -804,16 +842,18 @@ async def _account_context(request: Request, session_id: str, **notes) -> dict:
     }
 
 
-def _unlinkable(identities, has_password: bool) -> frozenset[str]:
-    """The linked services the account page offers Unlink for: every link that is
-    not a way in, and a way in while a password or another way in remains — the
-    same rule identities.unlink_identity enforces, asked of the same table."""
-    ways_in = [row["provider"] for row in identities
-               if revocation.is_login_provider(row["provider"])]
-    return frozenset(
-        row["provider"] for row in identities
-        if not revocation.is_login_provider(row["provider"]) or has_password
-        or len(ways_in) > 1)
+def _day(timestamp, zone) -> str:
+    """A stored moment as the account page says a day: "Nov 10, 2026"."""
+    moment = clock.moment(timestamp, zone)
+    return f"{moment:%b} {moment.day}, {moment.year}" if moment else ""
+
+
+def _unlinkable(identities, ways: auth.WaysIn) -> frozenset[str]:
+    """The linked services the account page offers Unlink for: every link whose
+    removal leaves the account a way in — `WaysIn.leaves_none`, the very answer
+    identities.unlink_identity refuses by."""
+    return frozenset(row["provider"] for row in identities
+                     if not ways.leaves_none(link=row["provider"]))
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1006,27 +1046,28 @@ async def set_own_username(request: Request):
     free the old name for somebody else to claim. That path stays with an
     administrator, who has the retired-identifier machinery to do it safely.
 
-    Answered with the credentials section, and the heading and the names beside it
-    out of band — the heading falls back to a username, and the names row shows it.
+    Answered with the names section, where the form is, and the heading out of
+    band — it falls back to a username — and the Sign-in tab's password section,
+    whose "choose one on Profile" line a claim takes away.
     """
     user = await auth.require_session(request)
     data = await authz.json_body(request)
     account = await auth.get_user(user.user_id)
     if account and account["username"]:
-        return await _section(request, user.session_id, "credentials", credentials_message=(
+        return await _section(request, user.session_id, "names", names_message=(
             "You already have a username. An administrator can change it."))
     username = str(data.get("username") or "").strip().lower()
     if err := await auth.username_availability_error(username):
-        return await _section(request, user.session_id, "credentials", credentials_message=err)
+        return await _section(request, user.session_id, "names", names_message=err)
     try:
         await auth.admin_set_username(user.user_id, username)
     except db.IntegrityError:
         # Lost a race between the availability check and this write; the UNIQUE
         # column is the real arbiter, exactly as registration treats it.
-        return await _section(request, user.session_id, "credentials",
-                              credentials_message="That username is taken.")
-    return await _section(request, user.session_id, "credentials", names_changed=True,
-                          credentials_ok=True, credentials_message="Username saved.")
+        return await _section(request, user.session_id, "names",
+                              names_message="That username is taken.")
+    return await _section(request, user.session_id, "names", names_changed=True,
+                          credentials_oob=True, names_ok=True, names_message="Username saved.")
 
 
 @guard.post("/me/display-name", AuthLevel.SESSION)
@@ -1052,6 +1093,24 @@ async def set_own_display_name(request: Request):
     return await _section(request, user.session_id, "names", names_changed=True)
 
 
+async def _current_password_refusal(ip: str, stored_hash: str, given) -> str | None:
+    """Why `given` does not prove the account's current password, or None when
+    it does — for every control that asks for it before acting.
+
+    The check is a guess-checking oracle, so it is throttled on the same shared
+    per-address counter a sign-in is — at the same tolerant threshold, since this
+    is reached by someone who is ALREADY signed in and locking them out over a
+    neighbour's typos is pure harm. A wrong guess counts; the caller clears the
+    counter once it has acted."""
+    if await auth.check_lockout("ip", ip, max_attempts=auth.LOGIN_IP_MAX_ATTEMPTS,
+                                window_seconds=auth.LOGIN_WINDOW_SECONDS):
+        return "Too many attempts. Try again later."
+    if not (await auth.verify_password(stored_hash, str(given or ""))).ok:
+        await auth.record_attempt("ip", ip, False)
+        return "That isn't your current password."
+    return None
+
+
 @guard.post("/me/password", AuthLevel.SESSION)
 async def set_own_password(request: Request):
     """Set or change the signed-in account's password.
@@ -1066,28 +1125,28 @@ async def set_own_password(request: Request):
     caller is then re-issued a fresh session, since signing the person out of the
     tab they just used would read as a failure — and the section is drawn from
     that new session, the only one left.
+
+    PASSKEYS OUTLIVE IT. Setting a password revokes sessions, not passkeys, and a
+    password change is what somebody does after a compromise — so where the
+    account holds any, the sentence says they still sign in and to remove one it
+    does not recognise. A FIRST password also redraws the passkeys section out of
+    band: adding one asks for the password, so its button comes on now.
     """
     user = await auth.require_session(request)
     settings = await load_settings()
     ip = auth.client_ip(request, settings)
-    # The current-password check is a guess-checking oracle, so it is throttled on
-    # the same shared per-address counter a sign-in is — at the same tolerant
-    # threshold, since this one is reached by someone who is ALREADY signed in and
-    # locking them out over a neighbour's typos is pure harm.
-    if await auth.check_lockout("ip", ip, max_attempts=auth.LOGIN_IP_MAX_ATTEMPTS,
-                                window_seconds=auth.LOGIN_WINDOW_SECONDS):
-        return await _section(request, user.session_id, "credentials",
-                              credentials_message="Too many attempts. Try again later.")
-
     data = await authz.json_body(request)
     account = await auth.get_user(user.user_id)
     stored_hash = account["password_hash"] if account else None
     if stored_hash:
-        result = await auth.verify_password(stored_hash, str(data.get("current_password") or ""))
-        if not result.ok:
-            await auth.record_attempt("ip", ip, False)
+        refusal = await _current_password_refusal(ip, stored_hash, data.get("current_password"))
+        if refusal:
             return await _section(request, user.session_id, "credentials",
-                                  credentials_message="That isn't your current password.")
+                                  credentials_message=refusal)
+    elif await auth.check_lockout("ip", ip, max_attempts=auth.LOGIN_IP_MAX_ATTEMPTS,
+                                  window_seconds=auth.LOGIN_WINDOW_SECONDS):
+        return await _section(request, user.session_id, "credentials",
+                              credentials_message="Too many attempts. Try again later.")
 
     password = str(data.get("password") or "")
     if password != str(data.get("password_confirm") or ""):
@@ -1104,10 +1163,271 @@ async def set_own_password(request: Request):
         user_agent=request.headers.get("user-agent"),
         ip_address=ip,
     )
+    holds_passkeys = await passkeys.holds_any(user.user_id)
+    saved = "Password saved. Every other session on this account has been signed out."
+    if holds_passkeys:
+        saved += (" Your passkeys still sign you in — remove any you don't recognise "
+                  "under Passkeys.")
     response = await _section(request, session_id, "credentials", credentials_ok=True,
-                              credentials_message="Password saved. Every other session "
-                                                  "on this account has been signed out.")
-    auth.set_session_cookie(response, session_id, settings, request)
+                              credentials_message=saved, passkeys_oob=not stored_hash)
+    auth.set_session_cookie(response, session_id, settings, request,
+                            leads_with_passkey=holds_passkeys)
+    return response
+
+
+# ---------------------------------------------------------------------------
+# passkeys
+# ---------------------------------------------------------------------------
+# A PASSKEY IS ONE MORE WAY INTO AN ACCOUNT THAT ALREADY EXISTS (app/auth/
+# passkeys.py says what one is and where its challenge lives). Both ceremonies
+# are a handshake made BEFORE the press, so the press is the gesture the browser's
+# prompt needs: a browser may refuse to open it outside the click that asked for
+# it, and a click does not survive a round trip — so signing in, the button
+# arrives from a POST the page makes once it has loaded (never from the GET of
+# the page, so a visitor without script mints nothing), and adding, "Add a
+# passkey" is answered with a "Create passkey" button carrying the options.
+# static/js/passkey.js calls the browser's credential API and posts what it
+# answered; every sentence is drawn here.
+
+def _passkey_sentence(error: str) -> str:
+    """What the page says when the BROWSER did not use a passkey — the person
+    closed the prompt, it timed out, or the device refused. Its error's name is
+    all passkey.js sends; nothing about the account is in it."""
+    if error == "InvalidStateError":
+        return "This device already holds a passkey for this account."
+    return "No passkey was used. Try again."
+
+
+async def _passkey_button(request: Request, settings: Settings,
+                          relying_party: passkeys.RelyingParty, *, lead: bool,
+                          message: str = "") -> Response:
+    """The "Sign in with a passkey" button, on a fresh handshake pinned to this
+    browser, with the sentence an attempt before it ended in."""
+    state = await passkeys.start("login")
+    response = templates.TemplateResponse(request, "_passkey_signin.html", {
+        "request": request, "options": passkeys.sign_in_options(relying_party, state),
+        "origin": relying_party.origin, "lead": lead, "message": message})
+    passkeys.set_attempt_cookie(response, state, settings, request)
+    return response
+
+
+@guard.post("/login/passkey/offer", AuthLevel.PUBLIC)
+async def offer_passkey_sign_in(request: Request):
+    """The sign-in page's passkey button, asked for once the page has loaded.
+
+    THROTTLED LIKE EVERY SIGN-IN START (`handshake_start_limited`, one budget per
+    address across every service), because each answer is a handshake row. When
+    throttled no button is drawn — and a page that leads with a passkey opens its
+    password fold instead, with a sentence, since there is nothing to lead with.
+
+    Loads settings without opening secrets, as /login does: nothing here needs
+    one, and it must work while the at-rest key is wrong."""
+    await authz.json_body(request)
+    settings = await load_settings(open_secrets=False)
+    relying_party = passkeys.relying_party(settings)
+    if relying_party is None:
+        return Response(status_code=204)
+    lead = auth.leads_with_passkey(request, settings)
+    if await auth.handshake_start_limited(request, settings):
+        return templates.TemplateResponse(request, "_passkey_signin.html", {
+            "request": request, "throttled": True, "lead": lead})
+    return await _passkey_button(request, settings, relying_party, lead=lead)
+
+
+@guard.post("/login/passkey", AuthLevel.PUBLIC)
+async def sign_in_with_passkey(request: Request):
+    """Sign in with the passkey the browser answered with.
+
+    EVERY REFUSAL IS ONE SENTENCE (passkeys.REFUSED) — an unknown or removed
+    passkey, another account's, a bad signature, a disabled account and a locked
+    out address alike — and answers with a fresh button, so a refusal is never an
+    oracle for whether a passkey is known here. Failures count on the per-address
+    sign-in counter; a locked-out address is refused WITHOUT being counted, for
+    the reason `login` gives; success clears it. A press the browser itself
+    refused is not a failure and is not counted.
+
+    Then the end every sign-in shares (`_signed_in`)."""
+    data = await authz.json_body(request)
+    settings = await load_settings(open_secrets=False)
+    relying_party = passkeys.relying_party(settings)
+    if relying_party is None:
+        return refused(request, passkeys.REFUSED)
+    lead = auth.leads_with_passkey(request, settings)
+    ip = auth.client_ip(request, settings)
+    sentence = passkeys.REFUSED + (" You can use your password below." if lead else "")
+
+    if await auth.check_lockout("ip", ip, max_attempts=auth.LOGIN_IP_MAX_ATTEMPTS,
+                                window_seconds=auth.LOGIN_WINDOW_SECONDS):
+        logger.warning("Passkey sign-in refused: this address is temporarily locked out "
+                       "after failed sign-in attempts. Attempts made while locked are not "
+                       "counted.")
+        return await _passkey_button(request, settings, relying_party, lead=lead,
+                                     message=sentence)
+    error = str(data.get("error") or "")
+    try:
+        state = await passkeys.consume(request, settings, purpose="login")
+    except passkeys.Refused:
+        if error:
+            return await _passkey_button(request, settings, relying_party, lead=lead,
+                                         message=_passkey_sentence(error))
+        await auth.record_attempt("ip", ip, False)
+        return await _passkey_button(request, settings, relying_party, lead=lead,
+                                     message=sentence)
+    if error:
+        return await _passkey_button(request, settings, relying_party, lead=lead,
+                                     message=_passkey_sentence(error))
+    try:
+        user_id = await passkeys.finish_sign_in(relying_party, state,
+                                                str(data.get("credential") or ""))
+    except passkeys.Refused:
+        await auth.record_attempt("ip", ip, False)
+        return await _passkey_button(request, settings, relying_party, lead=lead,
+                                     message=sentence)
+    user = await auth.get_user(user_id)
+    await auth.clear_attempts("ip", ip)
+    response = await _signed_in(request, user_id, bool(user["calendar_approved"]),
+                                settings, ip)
+    passkeys.clear_attempt_cookie(response, settings, request)
+    return response
+
+
+@guard.post("/me/passkeys/begin", AuthLevel.SESSION)
+async def begin_adding_passkey(request: Request):
+    """"Add a passkey": the account's current password and a name, answered with
+    the "Create passkey" button that carries the options.
+
+    THE PASSWORD COMES FIRST, because a stolen session could otherwise add the
+    thief's passkey — and it would outlive the password change meant to evict
+    them, since setting a password revokes sessions and not passkeys. It is
+    checked exactly as /me/password checks it (`_current_password_refusal`), and
+    only a password that verifies mints the handshake, so the challenge itself
+    is the proof and the finish asks nothing more. An account with no password
+    is drawn the control disabled with a line saying so; a post from it anyway
+    is refused here."""
+    user = await auth.require_session(request)
+    data = await authz.json_body(request)
+    settings = await load_settings()
+    relying_party = passkeys.relying_party(settings)
+    if relying_party is None:
+        return await _section(request, user.session_id, "passkeys", passkeys_message=(
+            "Passkeys need an https public base URL."))
+    account = await auth.get_user(user.user_id)
+    if not (account and account["password_hash"]):
+        return await _section(request, user.session_id, "passkeys", passkeys_message=(
+            "Set a password first — adding a passkey asks for it."))
+    ip = auth.client_ip(request, settings)
+    refusal = await _current_password_refusal(ip, account["password_hash"],
+                                              data.get("current_password"))
+    if refusal:
+        return await _section(request, user.session_id, "passkeys", passkeys_message=refusal,
+                              passkey_name=passkeys.clean_name(data.get("name")))
+    await auth.clear_attempts("ip", ip)
+    if len(await passkeys.for_account(user.user_id)) >= passkeys.MAX_PER_ACCOUNT:
+        return await _section(request, user.session_id, "passkeys", passkeys_message=(
+            f"An account can hold at most {passkeys.MAX_PER_ACCOUNT} passkeys. "
+            "Remove one first."))
+    return await _passkey_create(request, settings, relying_party, user,
+                                 passkeys.clean_name(data.get("name")))
+
+
+async def _passkey_create(request: Request, settings: Settings,
+                          relying_party: passkeys.RelyingParty, user, name: str,
+                          message: str = "") -> Response:
+    """The passkeys section with the "Create passkey" button, on a fresh link
+    handshake bound to this session and pinned to this browser."""
+    state = await passkeys.start("link", session_id=user.session_id)
+    options = await passkeys.creation_options(relying_party, state,
+                                              await auth.get_user(user.user_id))
+    response = await _section(request, user.session_id, "passkeys", passkey_create=options,
+                              passkey_name=name, passkeys_message=message)
+    passkeys.set_attempt_cookie(response, state, settings, request)
+    return response
+
+
+@guard.post("/me/passkeys", AuthLevel.SESSION)
+async def add_passkey(request: Request):
+    """Store the passkey the browser made, against the challenge "Add a passkey"
+    minted.
+
+    A handshake this session did not start, or one already used or expired, is
+    a refusal back to the first step: the password has to be proven again. One
+    that was this session's own but where the browser made nothing — the prompt
+    closed — answers with a fresh "Create passkey" button, since the password was
+    proven for it. Adding one sets this browser's sign-in hint: its sign-in page
+    now leads with a passkey."""
+    user = await auth.require_session(request)
+    data = await authz.json_body(request)
+    settings = await load_settings()
+    relying_party = passkeys.relying_party(settings)
+    name = passkeys.clean_name(data.get("name"))
+    if relying_party is None:
+        return await _section(request, user.session_id, "passkeys", passkeys_message=(
+            "Passkeys need an https public base URL."))
+    try:
+        state = await passkeys.consume(request, settings, purpose="link",
+                                       session_id=user.session_id)
+    except passkeys.Refused:
+        return await _section(request, user.session_id, "passkeys", passkey_name=name,
+                              passkeys_message="That took too long. Start again.")
+    if error := str(data.get("error") or ""):
+        return await _passkey_create(request, settings, relying_party, user, name,
+                                     message=_passkey_sentence(error))
+    try:
+        await passkeys.finish_adding(relying_party, state, user.user_id,
+                                     str(data.get("credential") or ""), name)
+    except passkeys.Refused as exc:
+        return await _section(request, user.session_id, "passkeys", passkey_name=name,
+                              passkeys_message=str(exc))
+    response = await _section(request, user.session_id, "passkeys", passkeys_ok=True,
+                              passkeys_message=f"Passkey “{name}” added.")
+    passkeys.clear_attempt_cookie(response, settings, request)
+    auth.set_sign_in_hint(response, True, settings, request)
+    return response
+
+
+def _passkey_id(data: dict) -> int | None:
+    try:
+        return int(str(data.get("passkey") or ""))
+    except ValueError:
+        return None
+
+
+@guard.post("/me/passkeys/rename", AuthLevel.SESSION)
+async def rename_passkey(request: Request):
+    user = await auth.require_session(request)
+    data = await authz.json_body(request)
+    passkey_id = _passkey_id(data)
+    if passkey_id is None or not await passkeys.rename(user.user_id, passkey_id,
+                                                       data.get("name")):
+        return await _section(request, user.session_id, "passkeys",
+                              passkeys_message="That passkey isn't on this account.")
+    return await _section(request, user.session_id, "passkeys", passkeys_ok=True,
+                          passkeys_message="Passkey renamed.")
+
+
+@guard.post("/me/passkeys/remove", AuthLevel.SESSION)
+async def remove_passkey(request: Request):
+    """Remove one of the account's passkeys — refused when it is the account's
+    last way in (identities.WaysIn), which the page never offers. Removing the
+    account's LAST passkey clears this browser's sign-in hint, so its sign-in
+    page goes back to leading with the password."""
+    user = await auth.require_session(request)
+    data = await authz.json_body(request)
+    passkey_id = _passkey_id(data)
+    try:
+        removed = passkey_id is not None and await passkeys.remove(user.user_id, passkey_id)
+    except auth.LastLoginMethod:
+        return await _section(request, user.session_id, "passkeys", passkeys_message=(
+            "That's the only way you can sign in. Set a password or link another account "
+            "first."))
+    if not removed:
+        return await _section(request, user.session_id, "passkeys",
+                              passkeys_message="That passkey isn't on this account.")
+    response = await _section(request, user.session_id, "passkeys", passkeys_ok=True,
+                              passkeys_message="Passkey removed. It may still be listed on "
+                                               "your device; it no longer signs in here.")
+    if not await passkeys.holds_any(user.user_id):
+        auth.set_sign_in_hint(response, False, await load_settings(), request)
     return response
 
 

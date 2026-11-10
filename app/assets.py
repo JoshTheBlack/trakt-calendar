@@ -95,6 +95,9 @@ PUBLIC_SCRIPTS = (
     "static/js/ui.js",
     # Signing in and registering with Plex.
     "static/js/plex-auth.js",
+    # Signing in with a passkey, and adding one from the account page (which loads
+    # this list too, as APP_SCRIPTS begins with it).
+    "static/js/passkey.js",
     # A shared calendar's poster-only cards open their panel away from the edge
     # the same way the owner's calendar does.
     "static/js/calendar/layout.js",

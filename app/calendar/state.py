@@ -50,8 +50,14 @@ logger = logging.getLogger(__name__)
 # literally spelled `1670` — the show's slug — and tmdb 1670 is a different
 # programme entirely. A false match here HIDES something the viewer never
 # marked, which is the one failure that leaves no trace on the page.
-_LEGACY_ID_NAMESPACES = ("slug", "simkl_slug", "trakt_slug", "traktslug",
-                         "tvdbslug", "mdlslug")
+#
+# SIMKL'S `traktslug`, `tvdbslug` AND `mdlslug` WERE HERE TOO, and went when the
+# title store stopped keeping them (every writer files a group's ids in one
+# spelling, app/metadata/ids.py): a card's ids come from the store, so a mark
+# spelled in one of them matched nothing. Migration 50 rewrote each such mark
+# that named exactly one stored title to that title's key, which is what a
+# card's `mark_key` is.
+_LEGACY_ID_NAMESPACES = ("slug", "simkl_slug", "trakt_slug")
 
 
 def marked(marks, item) -> bool:

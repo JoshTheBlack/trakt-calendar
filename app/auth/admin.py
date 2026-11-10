@@ -58,6 +58,15 @@ async def list_users_overview() -> list[dict]:
         "SELECT user_id, MAX(last_seen_at) AS last_seen_at FROM sessions GROUP BY user_id"
     )
     last_seen = {int(row["user_id"]): row["last_seen_at"] for row in sessions}
+    # Each account's passkeys — names and clocks, never a key — for the admin view,
+    # which can remove one under the same "this leaves no way in" confirmation
+    # an unlink asks.
+    keys: dict[int, list[dict]] = {}
+    for row in await db.fetch_all("SELECT id, user_id, name, created_at, last_used_at "
+                                  "FROM passkeys ORDER BY created_at, id"):
+        keys.setdefault(int(row["user_id"]), []).append(
+            {"id": int(row["id"]), "name": row["name"], "created_at": row["created_at"],
+             "last_used_at": row["last_used_at"]})
 
     overview = []
     for u in user_rows:
@@ -77,6 +86,7 @@ async def list_users_overview() -> list[dict]:
             "chosen_name": u["display_name"],
             "display_name": display,
             "providers": [i["provider"] for i in idents],
+            "passkeys": keys.get(uid, []),
             "is_admin": bool(u["is_admin"]),
             "is_bootstrap": bool(u["is_bootstrap"]),
             "calendar_approved": bool(u["calendar_approved"]),

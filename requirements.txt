@@ -15,6 +15,11 @@ Pillow==12.3.0
 # at rest in the DB. Ships manylinux and Windows wheels, so it resolves in both
 # the .venv and the Docker build without a compiler.
 cryptography==49.0.0
+# Passkey sign-in (app/auth/passkeys.py): py_webauthn by Duo Labs makes the options
+# a browser's credential API takes and verifies what it answers — the signature,
+# the challenge, the origin and the rp id. Pulls in cbor2, pyasn1, pyasn1-modules
+# and pyOpenSSL beside the cryptography pinned above; wheels on both platforms.
+webauthn==3.0.1
 # Renders CHANGELOG.md for the in-app changelog modal (app/changelog.py). Chosen
 # over a hand-rolled renderer because the changelog is hand-authored: the day
 # somebody adds a table or a nested list, a regex renderer mangles it silently.

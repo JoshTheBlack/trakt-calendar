@@ -9,6 +9,7 @@ from it or stores it.
 """
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from typing import Any
 
@@ -40,3 +41,15 @@ def canonical(ids: Mapping[str, Any] | None) -> dict:
     """
     return {name: typed(name, value) for name, value in collect_ids(ids or {}).items()
             if name != "slug"}
+
+
+def stored(ids: Mapping[str, Any] | None) -> str:
+    """`canonical(ids)` as the text a title group's `ids_json` holds, its keys
+    sorted — the one spelling a listing and a description both write.
+
+    THE TEXT IS WHAT IS COMPARED. A writer asks before its lock whether its
+    write would change the stored row (groups.changing), column by column as
+    stored, so the same ids in another key order are a change: a description
+    sorted its keys and a listing kept its service's order, and every fill after
+    a description rewrote the group to say the same thing."""
+    return json.dumps(canonical(ids), sort_keys=True)

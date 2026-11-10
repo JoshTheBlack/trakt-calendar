@@ -119,6 +119,8 @@ def set_session_cookie(
     session_id: str,
     settings: Settings,
     request: Request | None = None,
+    *,
+    leads_with_passkey: bool,
 ) -> None:
     """Issue the session cookie: HttpOnly, SameSite=Lax, Path=/, no Domain, and
     Secure (with the `__Host-` name) unless the Secure policy says otherwise.
@@ -127,6 +129,11 @@ def set_session_cookie(
     is the authority on both clocks, so a cookie that outlives its row is simply
     rejected — whereas a cookie expiring at the sliding window would log out the
     active user that sliding exists to keep signed in.
+
+    `leads_with_passkey` IS REQUIRED, and it is whether the account just signed
+    in holds a passkey (`set_sign_in_hint` says what it is for). Every sign-in
+    issues a session through here, so a way of signing in cannot be written that
+    forgets to say how this browser should be greeted next time.
     """
     secure = use_secure_cookie(settings, request)
     response.set_cookie(
@@ -138,6 +145,53 @@ def set_session_cookie(
         samesite="lax",
         secure=secure,
     )
+    set_sign_in_hint(response, leads_with_passkey, settings, request)
+
+
+# ---------------------------------------------------------------------------
+# how this browser signs in
+# ---------------------------------------------------------------------------
+# THE SIGN-IN PAGE LEADS WITH A PASSKEY ONCE THIS BROWSER HAS SIGNED IN TO AN
+# ACCOUNT HOLDING ONE, with the password one press away. The server cannot know
+# who is at the sign-in page, and asking for a username first would tell a
+# stranger which accounts hold passkeys — so the page follows the last account
+# that signed in here. The cookie's value says only "lead with a passkey": it
+# names no account and grants nothing, and signing out leaves it alone, because
+# it says how this browser signs in, not who is signed in. The session cookie's
+# attributes and Secure policy, under a name of its own, for a year.
+SIGN_IN_HINT = "tns_signin"
+SIGN_IN_HINT_SECURE = "__Host-tns_signin"
+SIGN_IN_HINT_SECONDS = 365 * 24 * 60 * 60
+_LEAD_WITH_PASSKEY = "passkey"
+
+
+def set_sign_in_hint(response: Response, leads_with_passkey: bool, settings: Settings,
+                     request: Request | None = None) -> None:
+    """Say whether this browser's sign-in page leads with a passkey: set by every
+    sign-in (`set_session_cookie`), by adding a passkey, and cleared by removing
+    an account's last one in the browser that removed it."""
+    secure = use_secure_cookie(settings, request)
+    if leads_with_passkey:
+        response.set_cookie(key=SIGN_IN_HINT_SECURE if secure else SIGN_IN_HINT,
+                            value=_LEAD_WITH_PASSKEY, max_age=SIGN_IN_HINT_SECONDS, path="/",
+                            httponly=True, samesite="lax", secure=secure)
+        return
+    # Taken off only where this browser sent one: every sign-in of an account
+    # without a passkey passes here, and a deletion it did not need would be a
+    # second cookie header on every one — a Secure one, on a plain-http instance.
+    held = request.cookies if request is not None else {}
+    for name, name_secure in ((SIGN_IN_HINT, False), (SIGN_IN_HINT_SECURE, True)):
+        if name in held:
+            response.delete_cookie(name, path="/", httponly=True, samesite="lax",
+                                   secure=name_secure)
+
+
+def leads_with_passkey(request: Request, settings: Settings) -> bool:
+    """Whether this browser's sign-in page leads with a passkey."""
+    secure = use_secure_cookie(settings, request)
+    preferred = SIGN_IN_HINT_SECURE if secure else SIGN_IN_HINT
+    other = SIGN_IN_HINT if secure else SIGN_IN_HINT_SECURE
+    return (request.cookies.get(preferred) or request.cookies.get(other)) == _LEAD_WITH_PASSKEY
 
 
 def clear_session_cookie(

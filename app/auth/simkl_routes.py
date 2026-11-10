@@ -122,7 +122,7 @@ KEY_UNHEALTHY = (
     "Settings) before linking can continue."
 )
 
-_BACK_TO_ACCOUNT = {"back": "/me", "back_label": "Back to your account"}
+_BACK_TO_ACCOUNT = {"back": "/me?tab=sign-in", "back_label": "Back to your account"}
 
 # What each shared refusal looks like as a PAGE. The message and the status ride
 # on the refusal itself — this is only the chrome around them. Two tables rather

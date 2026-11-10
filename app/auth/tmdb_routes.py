@@ -93,7 +93,7 @@ REVOKE_FAILED_NOTICE = (
     "connection. Remove it yourself under Settings > Sessions on themoviedb.org."
 )
 
-_BACK_TO_ACCOUNT = {"back": "/me", "back_label": "Back to your account"}
+_BACK_TO_ACCOUNT = {"back": "/me?tab=sign-in", "back_label": "Back to your account"}
 
 # The title of the dead-end page each shared refusal is drawn as. A link starts
 # and ends on the account page, so every one of them goes "back" there.

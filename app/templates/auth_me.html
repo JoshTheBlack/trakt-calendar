@@ -21,12 +21,26 @@
 {% endcall %}
 
 <div class="auth-page-inner">
-<div class="auth-shell">
+<div class="auth-shell" id="accountTabs">
   {# EVERY CONTROL ON THIS PAGE POSTS ITSELF and is answered with the section it
      sits in, drawn by the server from the same context this page is
      (app/auth/routes.py's _account_context). There is no script of the page's own:
      what is left for a browser is reading a chosen picture into a field and the
-     Plex window, both shared files. #}
+     Plex window, both shared files.
+
+     THE TABS ARE RADIOS AND STYLESHEET RULES, as the tracker's are: a tab strip is
+     a radiogroup, and `:has()` on this element shows the panel whose radio is
+     checked (style.css, `.account-panel`). THE RADIOS LIVE HERE, OUTSIDE THE CARD,
+     because unlinking a service redraws the whole card — radios inside it would
+     come back with the first tab checked after every unlink. Every section stays
+     on the page whichever tab is open, so an answer that redraws one on another
+     tab out of band (a service's picture, a first password turning passkeys on)
+     still lands. Which tab opens is the server's (`?tab=`), so a link — the way
+     back from linking a service — can name one. #}
+  {% for tab in account_tabs %}
+  <input type="radio" name="account-tab" id="account-tab-{{ tab.key }}" class="account-tab-radio"
+         autocomplete="off"{% if tab.key == account_tab %} checked{% endif %}>
+  {% endfor %}
   {% include '_account_card.html' %}
 </div>
 </div>

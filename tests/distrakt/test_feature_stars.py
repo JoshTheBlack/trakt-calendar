@@ -46,13 +46,40 @@ class FeatureStarsTestCase(MonthFragmentTestCase):
                      else distrakt_store.RecordKind.SEASON_PREMIERE)}))
 
     def press(self, key: str, on: bool = True) -> TrackerMonth:
+        return TrackerMonth(self.press_answer(key, on).text)
+
+    def press_answer(self, key: str, on: bool = True):
         year, month = self.current
         outer, season, calendar = self.offline()
         with outer, season, calendar:
             resp = self.client.post(f"/api/distrakt/feature?year={year}&month={month}",
                                     json={"key": key, "on": on})
         self.assertEqual(resp.status_code, 200, resp.text[:300])
-        return TrackerMonth(resp.text)
+        return resp
+
+    def landed(self, drawn: str, resp) -> str:
+        """What htmx puts on the page from `resp`, answering the star `drawn`:
+        every out-of-band element, plus the main content only where the swap
+        that applies — the answer's HX-Reswap, else the star's own `hx-swap` —
+        is not "none" (the vendored htmx returns before swapping a "none"
+        target's main content) and its target is on the page."""
+        swap = re.search(r'class="btn-ghost small distrakt-feature[^"]*"[^>]*hx-swap="([^"]*)"',
+                         drawn).group(1)
+        swap = resp.headers.get("HX-Reswap", swap)
+        oob = "".join(found.group(0) for found in
+                      re.finditer(r'<(\w+)[^>]*hx-swap-oob=.*?</\1>', resp.text, re.S))
+        if swap.split()[0] == "none":
+            return oob
+        target = resp.headers.get("HX-Retarget", "")
+        self.assertTrue(target.startswith("#") and f'id="{target[1:]}"' in self.page_html(),
+                        f"{target!r} is not on the tracker's page")
+        return resp.text
+
+    def page_html(self) -> str:
+        year, month = self.current
+        resp = self.client.get(f"/distrakt?year={year}&month={month}")
+        self.assertEqual(resp.status_code, 200)
+        return resp.text
 
     def stored(self) -> tuple[str, ...]:
         return asyncio.run(share_highlights.for_month(self.user_id, *self.current))
@@ -163,6 +190,34 @@ class PressingAStarTests(FeatureStarsTestCase):
         self.assertIn("Premiere 04", answer.titles)
         self.assertEqual(len([s for s in self.stars(answer.html)
                               if 'aria-pressed="true"' in s]), 1)
+
+
+class WhatAPressPutsOnThePageTests(FeatureStarsTestCase):
+    """What lands, not what the answer holds: the star is `hx-swap="none"`, so
+    an answer whose stars are drawn in place and not out of band would be saved
+    and shown nowhere."""
+
+    def setUp(self):
+        super().setUp()
+        self.drawn = self.month(*self.current).html
+
+    def assert_the_star_filled(self, landed: str) -> None:
+        on = [star for star in self.stars(landed) if 'aria-pressed="true"' in star]
+        self.assertEqual(len(on), 1, "the pressed star did not land")
+        self.assertIn("features 1 of up to 10", self.line(landed))
+
+    def test_with_the_month_kept_the_stars_land_out_of_band(self):
+        self.assert_the_star_filled(self.landed(self.drawn, self.press_answer(_key(4))))
+
+    def test_after_a_restart_the_month_lands_where_the_list_is(self):
+        post_memo.forget_all()
+        resp = self.press_answer(_key(4))
+        self.assert_the_star_filled(self.landed(self.drawn, resp))
+        self.assertEqual(resp.headers["HX-Retarget"], "#distraktShowList")
+        # And the month is kept again, so the next press is the small answer.
+        again = self.press_answer(_key(5))
+        self.assertNotIn("HX-Retarget", again.headers)
+        self.assertIn("features 2 of up to 10", self.line(self.landed(self.drawn, again)))
 
 
 class TakingAShowOffTheMonthTests(FeatureStarsTestCase):

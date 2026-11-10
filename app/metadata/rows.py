@@ -46,6 +46,7 @@ from .. import db, providers
 from ..media import artwork
 from ..providers.base import Record, Source
 from . import groups, holders, identity, merge, tables
+from . import ids as id_rules
 
 logger = logging.getLogger(__name__)
 
@@ -275,9 +276,16 @@ def _title_values(record: Record) -> dict[str, Any]:
         # services' ratings side by side and never averages them; a map keyed by
         # who said it is what keeps that honest when a third service arrives.
         ratings[str(record.source)] = record.rating
+    # THE IDS IN THE STORE'S ONE SPELLING (ids.stored), which a description
+    # files too. A listing filed them as the service stated them — Trakt's and
+    # Simkl's bare `slug`, Simkl's `traktslug` / `tvdbslug` and the rest — so
+    # every description took them off and the next fill put them back: a refill
+    # that changed nothing was a write of the group, and the description logged
+    # a change that was not one.
     return {
         "title": str(record.title or ""), "title_fold": fold_title(record.title),
-        "ids_json": json.dumps(record.ids or {}), "detail_url": str(record.detail_url or ""),
+        "ids_json": id_rules.stored(record.ids),
+        "detail_url": str(record.detail_url or ""),
         "year": str(record.year or ""), "network": str(record.network or ""),
         "country": str(record.country or ""), "language": str(record.language or ""),
         "certification": str(record.certification or ""), "status": str(record.status or ""),
@@ -474,7 +482,7 @@ class ListingRows(NamedTuple):
         for at, ids in changes.items():
             spelled = json.loads(titles[at])
             # Each row: media, the own id, then the group's listed fields.
-            spelled[2 + _listed_fields(self.sources[at]).index("ids_json")] = json.dumps(dict(ids))
+            spelled[2 + _listed_fields(self.sources[at]).index("ids_json")] = id_rules.stored(ids)
             titles[at] = json.dumps(spelled)
         return self._replace(titles=titles)
 
@@ -723,7 +731,7 @@ def _update_enriched_sql(source: str) -> str:
 
     `ids_json = json_patch(<learned>, ids_json)` MERGES AND LETS THE EXISTING
     WIN, which is the direction that matters. A lookup knows id spaces the
-    calendar file never carries -- tvdb, mal, anidb -- and adding them is most of
+    calendar file never carries -- tvdb, mal -- and adding them is most of
     why the payload is worth keeping; but the calendar file's OWN tmdb is the one
     the listing matched on, and a lookup overwriting it would re-identify a title
     under cover of enriching it.
@@ -849,7 +857,9 @@ def _enrichment_row(source: str, fields: dict) -> list:
             json.dumps(ratings),
             value["anime_type"],
             json.dumps(value["release_types_by_country"]),
-            json.dumps(value["ids"])]
+            # Learned ids in the spelling every writer files (`_title_values`
+            # says why): merged in raw, they put back what a description took off.
+            json.dumps(id_rules.canonical(value["ids"]))]
 
 
 async def apply_enrichment(source: str, service_id: int, media: str, fields: dict,
