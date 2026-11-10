@@ -310,6 +310,19 @@ Max-Age is the ABSOLUTE cap, never the sliding window (`app/auth/sessions.py`
 owns both clocks). A cookie expiring at the sliding window would log out the
 active user the sliding exists to keep signed in.
 
+**An account keeps a way in, and what is left without one is ONE function's
+answer.** `app/auth/identities.py`'s `ways_in` reads an account's ways in — its
+password and each link a service SIGNS IN with (`revocation._LINKED`'s
+`signs_in`: never TMDB's) — inside the caller's transaction, and `WaysIn.
+leaves_none` says whether removing one leaves none. Every removal of a way in
+refuses by it (`unlink_identity`, `LastLoginMethod`; an administrator may pass
+`force` after a confirmation), and every control the account page draws for one
+asks it too (`routes._unlinkable`), so the page offers a button exactly where
+the removal is allowed. Both used to count the ways apart from revocation's
+table; two counts of one rule is how a page comes to draw a button that only
+refuses, or to hide one the rule allows (tests/auth/test_ways_in.py holds the
+two to one answer).
+
 **Stored secrets are `enc:v1:`-prefixed ciphertext when encryption is on**, and
 plain otherwise, so sealed and legacy rows coexist in one column and a later
 scheme can be told apart (`app/secrets_box.py`). Ciphertext must never reach a

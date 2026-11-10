@@ -54,7 +54,8 @@ from .identities import (REFRESH_LEASE_SECONDS, AccountUnavailable, AnotherAccou
                          find_identity,
                          insert_linked_identity, link_provider_identity, list_identities,
                          login_with_provider_identity, release_identity_refresh,
-                         store_identity_tokens, unlink_identity)
+                         store_identity_tokens, unlink_identity, WaysIn, account_ways_in,
+                         ways_in)
 from .invites import (create_invite, find_invite_by_token, invite_is_usable,
                       list_invite_redemptions, list_invites, redeem_invite, revoke_invite)
 from .levels import (DEPENDENCY_FOR_LEVEL, AuthError, AuthLevel, current_user, require_admin,
@@ -90,8 +91,9 @@ __all__ = [
     "MIN_PASSWORD_LENGTH", "ProviderIdentity", "REFRESH_LEASE_SECONDS",
     "REGISTER_MAX_ATTEMPTS", "REGISTER_WINDOW_SECONDS", "RESERVED_IDENTIFIERS",
     "RegistrationRefused", "SESSION_ABSOLUTE_SECONDS", "SESSION_REFRESH_INTERVAL",
-    "SESSION_SLIDING_SECONDS", "UserNotFound", "VerifyResult", "WIPE_DATA_TABLES",
-    "admin_set_username", "any_users_exist", "browser_scheme", "burn_dummy_verify",
+    "SESSION_SLIDING_SECONDS", "UserNotFound", "VerifyResult", "WIPE_DATA_TABLES", "WaysIn",
+    "account_ways_in", "admin_set_username", "any_users_exist", "browser_scheme",
+    "burn_dummy_verify",
     "check_lockout", "claim_identity_refresh", "clear_attempts", "clear_handshake_cookie",
     "clear_session_cookie", "client_ip", "consume_handshake", "cooldown_remaining",
     "create_handshake", "create_invite", "create_session", "create_user", "current_user",
@@ -117,5 +119,5 @@ __all__ = [
     "set_user_timezone", "store_identity_tokens", "sweep_expired_sessions",
     "sweep_login_attempts", "unlink_identity", "update_password_hash", "update_user_prefs",
     "user_count", "username_availability_error", "validate_session", "verify_password",
-    "wipe_user_data",
+    "ways_in", "wipe_user_data",
 ]

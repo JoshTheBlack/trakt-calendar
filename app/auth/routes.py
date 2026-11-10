@@ -762,7 +762,7 @@ async def _account_context(request: Request, session_id: str, **notes) -> dict:
         # than showing none. A link nobody signs in with (TMDB's) is never a way
         # in, so it can always go, and never counts as the one left
         # (app/auth/revocation.py, identities.unlink_identity).
-        "can_unlink": _unlinkable(identities, bool(account and account["password_hash"])),
+        "can_unlink": _unlinkable(identities, await auth.account_ways_in(user.user_id)),
         # Drives whether the password form asks for a current password, and
         # whether the "a password is your way back in" nudge is shown.
         "has_password": bool(account and account["password_hash"]),
@@ -804,16 +804,12 @@ async def _account_context(request: Request, session_id: str, **notes) -> dict:
     }
 
 
-def _unlinkable(identities, has_password: bool) -> frozenset[str]:
-    """The linked services the account page offers Unlink for: every link that is
-    not a way in, and a way in while a password or another way in remains — the
-    same rule identities.unlink_identity enforces, asked of the same table."""
-    ways_in = [row["provider"] for row in identities
-               if revocation.is_login_provider(row["provider"])]
-    return frozenset(
-        row["provider"] for row in identities
-        if not revocation.is_login_provider(row["provider"]) or has_password
-        or len(ways_in) > 1)
+def _unlinkable(identities, ways: auth.WaysIn) -> frozenset[str]:
+    """The linked services the account page offers Unlink for: every link whose
+    removal leaves the account a way in — `WaysIn.leaves_none`, the very answer
+    identities.unlink_identity refuses by."""
+    return frozenset(row["provider"] for row in identities
+                     if not ways.leaves_none(link=row["provider"]))
 
 
 @dataclasses.dataclass(frozen=True)

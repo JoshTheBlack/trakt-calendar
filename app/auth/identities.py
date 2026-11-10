@@ -7,6 +7,7 @@ what makes "this account is already known, sign its owner in" a single lookup.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import NamedTuple
 
 from .. import db, secrets_box
 from ..config import Settings, load_settings
@@ -134,6 +135,48 @@ class IdentityWritesBlocked(Exception):
 
 class LastLoginMethod(Exception):
     """Unlinking would leave the account with no way to sign in at all."""
+
+
+class WaysIn(NamedTuple):
+    """Every way into one account: its password, and each linked service an
+    account can sign in with (app/auth/revocation.py's table says which).
+
+    THE ONE ANSWER TO "WHAT IS LEFT WITHOUT THIS ONE". An account with no way
+    in cannot be signed in to by anybody, its owner included, and there is no
+    self-service recovery from that — so a removal that would leave none is
+    refused (an administrator may force it), and the account page draws no
+    control that would only be refused. The refusal and the page used to work
+    the count out apart, each from revocation's table; asked of one function,
+    they cannot come to disagree about which button a removal allows.
+    """
+    password: bool
+    links: frozenset[str]
+
+    def leaves_none(self, *, link: str) -> bool:
+        """Whether removing the link to `link` leaves the account no way in. A
+        link nobody signs in with (TMDB's) is never one, so it never does."""
+        if link not in self.links:
+            return False
+        return not self.password and not (self.links - {link})
+
+
+def ways_in(conn: db.Connection, user_id: int) -> WaysIn:
+    """SYNCHRONOUS. `user_id`'s ways in, read on `conn` — inside the caller's
+    transaction where it then removes one, so two removals at once cannot each
+    find the other's way still there."""
+    user = conn.execute("SELECT password_hash FROM users WHERE id = ?", (user_id,)).fetchone()
+    providers = revocation.LOGIN_PROVIDERS
+    links = conn.execute(
+        f"SELECT provider FROM linked_identities WHERE user_id = ? "
+        f"AND provider IN ({', '.join('?' * len(providers))})",
+        (user_id, *providers)).fetchall()
+    return WaysIn(password=bool(user and user["password_hash"]),
+                  links=frozenset(str(row["provider"]) for row in links))
+
+
+async def account_ways_in(user_id: int) -> WaysIn:
+    """`ways_in` on a connection of its own, for a page drawing what it offers."""
+    return await db.run(lambda conn: ways_in(conn, user_id))
 
 
 async def find_identity(provider: str, provider_user_id: str | int):
@@ -328,10 +371,8 @@ async def unlink_identity(user_id: int, provider: str, *, force: bool = False) -
     """
     # ONLY A LINK SOMEBODY CAN SIGN IN WITH IS A WAY IN (app/auth/revocation.py).
     # Counting every link let an account holding a TMDB link — which nobody signs
-    # in with — have its one real way in removed, and lock itself out.
-    ways_in = revocation.LOGIN_PROVIDERS
-    marks = ", ".join("?" * len(ways_in))
-
+    # in with — have its one real way in removed, and lock itself out. What is
+    # left is `ways_in`'s answer, the one the account page draws its offer from.
     def _work(conn: db.Connection) -> bool:
         row = conn.execute(
             "SELECT id FROM linked_identities WHERE user_id = ? AND provider = ?",
@@ -339,14 +380,7 @@ async def unlink_identity(user_id: int, provider: str, *, force: bool = False) -
         ).fetchone()
         if row is None:
             return False
-        user = conn.execute("SELECT password_hash FROM users WHERE id = ?", (user_id,)).fetchone()
-        remaining = int(conn.execute(
-            f"SELECT COUNT(*) FROM linked_identities WHERE user_id = ? AND id != ? "
-            f"AND provider IN ({marks})",
-            (user_id, row["id"], *ways_in),
-        ).fetchone()[0])
-        last_way_in = revocation.is_login_provider(provider) and remaining == 0
-        if last_way_in and not (user and user["password_hash"]) and not force:
+        if ways_in(conn, user_id).leaves_none(link=provider) and not force:
             raise LastLoginMethod()
         conn.execute("DELETE FROM linked_identities WHERE id = ?", (row["id"],))
         return True
