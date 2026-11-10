@@ -22,6 +22,7 @@ from app import clock, db, metadata
 from app.distrakt import backup, lifecycle, store, watch_history
 from app.providers.base import ItemKey, LibraryEntry, LibraryRead, Media
 from tests.distrakt.test_store import DistraktTestCase, a_record
+from tests.support import statements_per_transaction
 
 TRACKED = "show:tmdb:87012"
 
@@ -125,6 +126,64 @@ class AServicesOwnIdPlacesItsPlaysTests(DistraktTestCase):
             self.user_id, month=store.month_key(today.year, today.month), tz=ZoneInfo("UTC"))
         self.assertEqual(questions.unknown, [])
         self.assertEqual(await store.open_prompts(self.user_id), [])
+
+
+async def _titles() -> dict[str, dict]:
+    return {row["title_key"]: json.loads(row["ids_json"]) for row in
+            await db.fetch_all("SELECT title_key, ids_json FROM titles")}
+
+
+class WhatTheTrackerWritesIsRegisteredTests(DistraktTestCase):
+    """Every title a history save or a month's film list names is registered as
+    it is written — a show watched and never tracked included."""
+
+    async def test_a_history_save_registers_every_show_and_film_it_holds(self):
+        state = {"shows": {"show:tmdb:100757": {"ids": {"tmdb": 100757, "trakt": 42},
+                                                "seasons": {}}},
+                 "movies": {"movie:tmdb:550": {"ids": {"tmdb": 550, "trakt": 9},
+                                               "watched_at": "2026-10-01T20:00:00Z",
+                                               "source": "trakt"}}}
+        await watch_history._save(self.user_id, state)
+        titles = await _titles()
+        self.assertEqual(titles["show:tmdb:100757"], {"tmdb": 100757, "trakt": 42})
+        self.assertEqual(titles["movie:tmdb:550"], {"tmdb": 550, "trakt": 9})
+
+    async def test_a_saved_row_moves_with_a_title_that_answers_to_a_higher_key(self):
+        """The store knows tvdb 4321 as tmdb 900; progress saved under the tvdb
+        key lands on the title's key."""
+        await known_title()
+        await watch_history._save(self.user_id, {
+            "shows": {"show:tvdb:4321": {"ids": {"tvdb": 4321, "tmdb": 900}, "seasons": {}}},
+            "movies": {}})
+        keys = {tuple(row) for row in await db.fetch_all(
+            "SELECT match_source, match_id FROM distrakt_show_progress")}
+        self.assertEqual(keys, {("tmdb", "900")})
+
+    async def test_registering_a_history_costs_the_lock_no_more_for_more_titles(self):
+        """A save holds the one write lock for a fixed number of statements
+        however many titles it registers — ten shows or a hundred."""
+        counts = []
+        for many in (10, 100):
+            state = {"shows": {f"show:tmdb:{n}": {"ids": {"tmdb": n}, "seasons": {}}
+                               for n in range(1000 * many, 1000 * many + many)},
+                     "movies": {}}
+            with statements_per_transaction() as counted:
+                await watch_history._save(self.user_id, state)
+            counts.append(counted[-1])
+        self.assertEqual(counts[0], counts[1])
+
+    async def test_a_months_films_are_registered_by_both_writers(self):
+        film = {"key": "movie:tmdb:603", "ids": {"tmdb": 603, "imdb": "tt0133093"},
+                "title": "The Matrix", "year": 1999, "watched_at": "2026-09-02T20:00:00Z"}
+        await store.save_month(self.user_id, {"month": "2026-09", "closed": True,
+                                              "movies": [film], "shows": []})
+        self.assertEqual((await _titles())["movie:tmdb:603"], {"tmdb": 603, "imdb": "tt0133093"})
+        old_shape = {"trakt_id": 11, "title": "Before films had keys", "year": 1999}
+        await store.set_month_movies(self.user_id, "2026-09", [
+            old_shape, {**film, "key": "movie:tmdb:604", "ids": {"tmdb": 604}}])
+        titles = await _titles()
+        self.assertEqual(titles["movie:tmdb:604"], {"tmdb": 604})
+        self.assertEqual(len(titles), 2, "an entry naming no key registers nothing")
 
 
 class ARestoreLandsOnTheTitlesKeyTests(DistraktTestCase):

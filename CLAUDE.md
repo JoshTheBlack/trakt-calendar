@@ -594,7 +594,10 @@ service's own listings (spelled before the caller's transaction by
 (a fill names hundreds of titles); `ensure` / `ensure_many` for a
 title met by its ids — a search pick, a tracker arrival, a board add, an import, a
 restore — which, handed a viewer's settings, ask each service the title has no id
-from ONCE by shared id. THAT IS THE ONE PLACE THE APP ASKS BY SHARED ID
+from ONCE by shared id; and `plan_registering` for a writer of many rows that
+each name a title — a viewer's watch history, a month's films — decided before
+its lock and applied after its rows, so a re-key takes them along, asking nobody.
+THAT IS THE ONE PLACE THE APP ASKS BY SHARED ID
 (`providers.for_shared_id_lookup`; each port keeps its own day-long clock). A
 caller spending ONE service's allowance narrows it to that service
 (`metadata.ask(..., asking=)`): the background completion
