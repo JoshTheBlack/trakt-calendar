@@ -23,8 +23,9 @@ data/
 scratch_data/
 data-*/
 
-# Claude Code local (personal) settings
-.claude/settings.local.json
+# Claude Code's folder, the shared settings.json included: its permission rules
+# record whole approved commands, and a command can carry a token.
+.claude/
 
 # Build/design notes (personal, not part of the release)
 Plans/
