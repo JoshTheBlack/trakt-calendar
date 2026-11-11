@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
-## 🏷️ [1.3.0] - UNRELEASED
+## 🏷️ [1.3.0] - 2026-11-11
 
 ### ⚠️ Upgrading
 - 🗄️ **Back up `data/app.db` first: the first start rebuilds the database** — about ten seconds for a 100 MB database before the app answers, longer in proportion for a bigger one, and the file grows by about a third.
